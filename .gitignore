@@ -1,4 +1,5 @@
 .DS_Store
+.pio/
 build/
 *.bin
 *.elf
