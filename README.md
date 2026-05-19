@@ -7,10 +7,12 @@ Use this when you have a sensor or loose signal wire and need to find which expo
 ## What It Does
 
 - Reads raw ADC values directly, without PulseSensorPlayground or other sensor libraries.
-- Scans `IO32`, `IO33`, `IO34`, `IO35`, `IO36`, and `IO39`.
+- Scans a small pin list chosen by the build profile.
+- For the `ESP32-2432S028` CYD profile, the known-working test pins are `IO35`, `IO22`, and `IO27`.
 - Shows each pin as a live bar on the CYD screen.
 - Tracks recent min/max movement for each pin.
 - Highlights the pin with the most movement in yellow.
+- Auto-sorts the most active pins toward the top about every 3 seconds.
 - Prints live serial readings at `115200` baud.
 
 ## Flash It
@@ -43,7 +45,8 @@ For a PulseSensor, the useful signal is usually a wiggling mid-range ADC value, 
 - Backlight: `GPIO 21`, set `OUTPUT/HIGH`
 - Display: ILI9341 320x240 CYD
 - ADC resolution: 12-bit for scanning, so values run `0..4095`
-- Scanner pins: `32`, `33`, `34`, `35`, `36`, `39`
+- Current `ESP32-2432S028` scan profile: `35`, `22`, `27`, `34`, `32`, `33`
+- Known-working connector tests so far: `GPIO35`, `GPIO22`, and `GPIO27`
 
 ## Relationship To CYD App Launcher
 

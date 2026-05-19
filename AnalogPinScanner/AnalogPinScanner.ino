@@ -33,7 +33,7 @@ const char* deviceName() {
 
 const char* footerHint() {
 #if PIN_SCANNER_PROFILE == PROFILE_ESP32_2432S028
-  return "Known: P3 IO35 ADC, CN1 IO27 ADC2. Avoid IO21.";
+  return "Known working: IO35, IO22, IO27. Auto-sorts.";
 #else
   return "Yellow = most signal movement. Rails are less useful.";
 #endif
@@ -43,6 +43,8 @@ const char* footerHint() {
 #define SCREEN_HEIGHT 240
 #define ADC_MAX_VALUE 4095
 #define HOT_MOVEMENT_MIN 20
+#define SORT_INTERVAL_MS 3000
+#define SORT_HYSTERESIS 8
 
 #define COLOR_BG 0x0000
 #define COLOR_TEXT 0xFFFF
@@ -66,11 +68,11 @@ struct AnalogPin {
 AnalogPin pins[] = {
 #if PIN_SCANNER_PROFILE == PROFILE_ESP32_2432S028
   {"P3  IO35", 35, 0, ADC_MAX_VALUE, 0, 0},
+  {"IO22", 22, 0, ADC_MAX_VALUE, 0, 0},
   {"CN1 IO27", 27, 0, ADC_MAX_VALUE, 0, 0},
   {"LDR IO34", 34, 0, ADC_MAX_VALUE, 0, 0},
   {"IO32", 32, 0, ADC_MAX_VALUE, 0, 0},
   {"IO33", 33, 0, ADC_MAX_VALUE, 0, 0},
-  {"IO36", 36, 0, ADC_MAX_VALUE, 0, 0},
 #else
   {"IO32", 32, 0, ADC_MAX_VALUE, 0, 0},
   {"IO33", 33, 0, ADC_MAX_VALUE, 0, 0},
@@ -87,6 +89,7 @@ void drawStaticUI();
 void updateReadings();
 void drawReadings();
 void drawPinRow(int index, bool hot);
+void maybeSortPins();
 int hottestPinIndex();
 bool isRailed(int value);
 
@@ -115,6 +118,7 @@ void loop() {
   static unsigned long lastSerial = 0;
 
   updateReadings();
+  maybeSortPins();
 
   if (millis() - lastDraw >= 100) {
     lastDraw = millis();
@@ -179,6 +183,23 @@ void drawReadings() {
   tft.fillRect(10, 224, 300, 12, COLOR_BG);
   tft.setCursor(10, 224);
   tft.print(footerHint());
+}
+
+void maybeSortPins() {
+  static unsigned long lastSort = 0;
+
+  if (millis() - lastSort < SORT_INTERVAL_MS) return;
+  lastSort = millis();
+
+  for (int pass = 0; pass < pinCount - 1; pass++) {
+    for (int i = 0; i < pinCount - 1 - pass; i++) {
+      if (pins[i + 1].movement > pins[i].movement + SORT_HYSTERESIS) {
+        AnalogPin temp = pins[i];
+        pins[i] = pins[i + 1];
+        pins[i + 1] = temp;
+      }
+    }
+  }
 }
 
 void drawPinRow(int index, bool hot) {
