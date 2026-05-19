@@ -1,16 +1,48 @@
 /*
  * AnalogPinScanner.ino
- * CYD connector diagnostic sketch for the ESP32-2432S028.
+ * Minimal ESP32 analog signal scanner for TFT boards.
  *
- * This reads raw connector pins directly, without PulseSensorPlayground.
- * Use it to test the P3 and CN1 pigtails before changing the dashboard.
+ * Keep this sketch broad and easy to tweak. Device-specific knowledge lives in
+ * the small settings block below; the scanner itself only looks for movement.
  */
 
 #include <TFT_eSPI.h>
 
-#define BACKLIGHT 21
+// ===== DEVICE SETTINGS =====
+
+#define PROFILE_GENERIC 0
+#define PROFILE_ESP32_2432S028 1
+
+#ifndef PIN_SCANNER_PROFILE
+#define PIN_SCANNER_PROFILE PROFILE_GENERIC
+#endif
+
+#if PIN_SCANNER_PROFILE == PROFILE_ESP32_2432S028
+#define BACKLIGHT_PIN 21
+#else
+#define BACKLIGHT_PIN 21
+#endif
+
+const char* deviceName() {
+#if PIN_SCANNER_PROFILE == PROFILE_ESP32_2432S028
+  return "ESP32-2432S028";
+#else
+  return "Generic ESP32";
+#endif
+}
+
+const char* footerHint() {
+#if PIN_SCANNER_PROFILE == PROFILE_ESP32_2432S028
+  return "Known: P3 IO35 ADC, CN1 IO27 ADC2. Avoid IO21.";
+#else
+  return "Yellow = most signal movement. Rails are less useful.";
+#endif
+}
+
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
+#define ADC_MAX_VALUE 4095
+#define HOT_MOVEMENT_MIN 20
 
 #define COLOR_BG 0x0000
 #define COLOR_TEXT 0xFFFF
@@ -19,62 +51,57 @@
 #define COLOR_BAR 0x07FF
 #define COLOR_HOT 0xFBE0
 #define COLOR_WARN 0xF800
-#define COLOR_OK 0x07E0
 
 TFT_eSPI tft = TFT_eSPI();
 
-enum RowKind {
-  ROW_ANALOG,
-  ROW_DIGITAL,
-  ROW_NOTE
-};
-
-struct ScanRow {
+struct AnalogPin {
   const char* label;
-  const char* detail;
   uint8_t pin;
-  RowKind kind;
   int value;
   int minValue;
   int maxValue;
   int movement;
 };
 
-ScanRow rows[] = {
-  {"P3  IO35", "ADC1 signal", 35, ROW_ANALOG, 0, 4095, 0, 0},
-  {"CN1 IO27", "ADC2 signal", 27, ROW_ANALOG, 0, 4095, 0, 0},
-  {"IO34 LDR", "onboard ADC", 34, ROW_ANALOG, 0, 4095, 0, 0},
-  {"IO22", "digital only", 22, ROW_DIGITAL, 0, 0, 1, 0},
-  {"P3  IO21", "backlight: do not use", 21, ROW_NOTE, 1, 0, 1, 0},
-  {"CN1 3V3", "power rail + GND", 255, ROW_NOTE, 1, 0, 1, 0},
+AnalogPin pins[] = {
+#if PIN_SCANNER_PROFILE == PROFILE_ESP32_2432S028
+  {"P3  IO35", 35, 0, ADC_MAX_VALUE, 0, 0},
+  {"CN1 IO27", 27, 0, ADC_MAX_VALUE, 0, 0},
+  {"LDR IO34", 34, 0, ADC_MAX_VALUE, 0, 0},
+  {"IO32", 32, 0, ADC_MAX_VALUE, 0, 0},
+  {"IO33", 33, 0, ADC_MAX_VALUE, 0, 0},
+  {"IO36", 36, 0, ADC_MAX_VALUE, 0, 0},
+#else
+  {"IO32", 32, 0, ADC_MAX_VALUE, 0, 0},
+  {"IO33", 33, 0, ADC_MAX_VALUE, 0, 0},
+  {"IO34", 34, 0, ADC_MAX_VALUE, 0, 0},
+  {"IO35", 35, 0, ADC_MAX_VALUE, 0, 0},
+  {"IO36", 36, 0, ADC_MAX_VALUE, 0, 0},
+  {"IO39", 39, 0, ADC_MAX_VALUE, 0, 0},
+#endif
 };
 
-const int rowCount = sizeof(rows) / sizeof(rows[0]);
+const int pinCount = sizeof(pins) / sizeof(pins[0]);
 
 void drawStaticUI();
 void updateReadings();
 void drawReadings();
-void drawRow(int index, bool hot);
-void drawAnalogRow(const ScanRow& row, int y, bool hot);
-void drawDigitalRow(const ScanRow& row, int y);
-void drawNoteRow(const ScanRow& row, int y);
+void drawPinRow(int index, bool hot);
+int hottestPinIndex();
+bool isRailed(int value);
 
 void setup() {
   Serial.begin(115200);
   delay(100);
 
-  pinMode(BACKLIGHT, OUTPUT);
-  digitalWrite(BACKLIGHT, HIGH);
+  pinMode(BACKLIGHT_PIN, OUTPUT);
+  digitalWrite(BACKLIGHT_PIN, HIGH);
 
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
 
-  for (int i = 0; i < rowCount; i++) {
-    if (rows[i].kind == ROW_ANALOG) {
-      pinMode(rows[i].pin, INPUT);
-    } else if (rows[i].kind == ROW_DIGITAL) {
-      pinMode(rows[i].pin, INPUT);
-    }
+  for (int i = 0; i < pinCount; i++) {
+    pinMode(pins[i].pin, INPUT);
   }
 
   tft.init();
@@ -96,11 +123,13 @@ void loop() {
 
   if (millis() - lastSerial >= 500) {
     lastSerial = millis();
-    Serial.printf("P3_IO35=%4d d%4d  CN1_IO27=%4d d%4d  IO34=%4d d%4d  IO22=%d\n",
-                  rows[0].value, rows[0].movement,
-                  rows[1].value, rows[1].movement,
-                  rows[2].value, rows[2].movement,
-                  rows[3].value);
+    for (int i = 0; i < pinCount; i++) {
+      Serial.printf("%s=%4d d%4d%s",
+                    pins[i].label,
+                    pins[i].value,
+                    pins[i].movement,
+                    i == pinCount - 1 ? "\n" : "  ");
+    }
   }
 }
 
@@ -108,132 +137,94 @@ void drawStaticUI() {
   tft.setTextColor(COLOR_TEXT, COLOR_BG);
   tft.setTextSize(2);
   tft.setCursor(10, 8);
-  tft.print("CYD Connector Scanner");
+  tft.print("Analog Pin Scanner");
 
   tft.setTextSize(1);
   tft.setTextColor(COLOR_DIM, COLOR_BG);
   tft.setCursor(10, 32);
-  tft.print("Pulse signal should wiggle mid-range. Yellow = most movement.");
+  tft.print(deviceName());
+  tft.print("  raw ADC 0..4095");
 
   tft.drawFastHLine(0, 48, SCREEN_WIDTH, COLOR_GRID);
 }
 
 void updateReadings() {
-  for (int i = 0; i < rowCount; i++) {
-    if (rows[i].kind == ROW_ANALOG) {
-      long total = 0;
-      for (int sample = 0; sample < 8; sample++) {
-        total += analogRead(rows[i].pin);
-        delayMicroseconds(150);
-      }
-
-      rows[i].value = total / 8;
-      if (rows[i].value < rows[i].minValue) rows[i].minValue = rows[i].value;
-      if (rows[i].value > rows[i].maxValue) rows[i].maxValue = rows[i].value;
-      rows[i].movement = rows[i].maxValue - rows[i].minValue;
-
-      // Slowly relax the observed range so old movement does not dominate.
-      if (rows[i].minValue < rows[i].value) rows[i].minValue++;
-      if (rows[i].maxValue > rows[i].value) rows[i].maxValue--;
-    } else if (rows[i].kind == ROW_DIGITAL) {
-      rows[i].value = digitalRead(rows[i].pin);
-      rows[i].movement = 0;
+  for (int i = 0; i < pinCount; i++) {
+    long total = 0;
+    for (int sample = 0; sample < 8; sample++) {
+      total += analogRead(pins[i].pin);
+      delayMicroseconds(150);
     }
+
+    pins[i].value = total / 8;
+    if (pins[i].value < pins[i].minValue) pins[i].minValue = pins[i].value;
+    if (pins[i].value > pins[i].maxValue) pins[i].maxValue = pins[i].value;
+    pins[i].movement = pins[i].maxValue - pins[i].minValue;
+
+    // Slowly relax the observed range so old movement does not dominate.
+    if (pins[i].minValue < pins[i].value) pins[i].minValue++;
+    if (pins[i].maxValue > pins[i].value) pins[i].maxValue--;
   }
 }
 
 void drawReadings() {
-  int hotIndex = 0;
-  for (int i = 1; i < rowCount; i++) {
-    if (rows[i].kind == ROW_ANALOG && rows[i].movement > rows[hotIndex].movement) {
-      hotIndex = i;
-    }
-  }
+  int hotIndex = hottestPinIndex();
 
-  for (int i = 0; i < rowCount; i++) {
-    drawRow(i, i == hotIndex && rows[i].kind == ROW_ANALOG && rows[i].movement > 20);
+  for (int i = 0; i < pinCount; i++) {
+    drawPinRow(i, i == hotIndex && pins[i].movement > HOT_MOVEMENT_MIN);
   }
 
   tft.setTextSize(1);
   tft.setTextColor(COLOR_DIM, COLOR_BG);
   tft.fillRect(10, 224, 300, 12, COLOR_BG);
   tft.setCursor(10, 224);
-  tft.print("Try Pulse purple on IO35, then IO27. Avoid IO21.");
+  tft.print(footerHint());
 }
 
-void drawRow(int index, bool hot) {
+void drawPinRow(int index, bool hot) {
   const int y = 58 + index * 27;
-  tft.fillRect(0, y - 2, SCREEN_WIDTH, 23, COLOR_BG);
-
-  if (rows[index].kind == ROW_ANALOG) {
-    drawAnalogRow(rows[index], y, hot);
-  } else if (rows[index].kind == ROW_DIGITAL) {
-    drawDigitalRow(rows[index], y);
-  } else {
-    drawNoteRow(rows[index], y);
-  }
-}
-
-void drawAnalogRow(const ScanRow& row, int y, bool hot) {
-  const int barX = 92;
+  const int barX = 82;
   const int barY = y + 3;
-  const int barW = 136;
+  const int barW = 150;
   const int barH = 14;
-  const int value = constrain(row.value, 0, 4095);
-  const int fillW = map(value, 0, 4095, 0, barW);
+  const int value = constrain(pins[index].value, 0, ADC_MAX_VALUE);
+  const int fillW = map(value, 0, ADC_MAX_VALUE, 0, barW);
   const uint16_t rowColor = hot ? COLOR_HOT : COLOR_TEXT;
   const uint16_t barColor = hot ? COLOR_HOT : COLOR_BAR;
 
+  tft.fillRect(0, y - 2, SCREEN_WIDTH, 23, COLOR_BG);
+
   tft.setTextSize(1);
   tft.setTextColor(rowColor, COLOR_BG);
-  tft.setCursor(10, y + 1);
-  tft.print(row.label);
-  tft.setTextColor(COLOR_DIM, COLOR_BG);
-  tft.setCursor(10, y + 12);
-  tft.print(row.detail);
+  tft.setCursor(10, y + 5);
+  tft.print(pins[index].label);
 
   tft.drawRect(barX, barY, barW, barH, COLOR_GRID);
   tft.fillRect(barX + 1, barY + 1, max(0, fillW - 2), barH - 2, barColor);
 
   tft.setTextColor(COLOR_TEXT, COLOR_BG);
-  tft.setCursor(238, y + 1);
+  tft.setCursor(244, y + 1);
   tft.printf("%4d", value);
 
   tft.setTextColor(hot ? COLOR_HOT : COLOR_DIM, COLOR_BG);
-  tft.setCursor(238, y + 12);
-  tft.printf("d%4d", row.movement);
+  tft.setCursor(244, y + 12);
+  tft.printf("d%4d", pins[index].movement);
 
-  if (value < 20 || value > 4075) {
+  if (isRailed(value)) {
     tft.setTextColor(COLOR_WARN, COLOR_BG);
-    tft.setCursor(288, y + 5);
+    tft.setCursor(292, y + 5);
     tft.print("rail");
   }
 }
 
-void drawDigitalRow(const ScanRow& row, int y) {
-  tft.setTextSize(1);
-  tft.setTextColor(COLOR_TEXT, COLOR_BG);
-  tft.setCursor(10, y + 1);
-  tft.print(row.label);
-  tft.setTextColor(COLOR_DIM, COLOR_BG);
-  tft.setCursor(10, y + 12);
-  tft.print(row.detail);
-
-  tft.setTextColor(row.value ? COLOR_OK : COLOR_WARN, COLOR_BG);
-  tft.setCursor(108, y + 5);
-  tft.print(row.value ? "HIGH" : "LOW ");
-
-  tft.setTextColor(COLOR_DIM, COLOR_BG);
-  tft.setCursor(174, y + 5);
-  tft.print("not ADC");
+int hottestPinIndex() {
+  int hotIndex = 0;
+  for (int i = 1; i < pinCount; i++) {
+    if (pins[i].movement > pins[hotIndex].movement) hotIndex = i;
+  }
+  return hotIndex;
 }
 
-void drawNoteRow(const ScanRow& row, int y) {
-  tft.setTextSize(1);
-  tft.setTextColor(COLOR_TEXT, COLOR_BG);
-  tft.setCursor(10, y + 1);
-  tft.print(row.label);
-  tft.setTextColor(COLOR_DIM, COLOR_BG);
-  tft.setCursor(10, y + 12);
-  tft.print(row.detail);
+bool isRailed(int value) {
+  return value < 20 || value > ADC_MAX_VALUE - 20;
 }
